@@ -8,6 +8,15 @@ public class ClaimProcessor {
     }
 
     public List<Claim__c> processAll() {
-        return new List<Claim__c>();
+  
+        List<Claim__c> claims = selector.getPendingClaims();
+        
+        for (Claim__c c : claims) {
+            c.Status__c = 'Approved';
+        }
+        
+        notifier.notify(claims);
+        
+        return claims;
     }
 }
