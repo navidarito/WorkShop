@@ -3,7 +3,6 @@ public class AccountPriorityService {
     public static void calculatePriority(List<Account> accounts) {
         Set<Id> accIds = new Map<Id, Account>(accounts).keySet();
         
-        // Bulkified Query: One query for all accounts
         Map<Id, Decimal> totalsMap = new Map<Id, Decimal>();
         for(AggregateResult ar : [SELECT AccountId, SUM(Amount) total FROM Opportunity 
                                   WHERE AccountId IN :accIds GROUP BY AccountId]) {
@@ -11,15 +10,20 @@ public class AccountPriorityService {
         }
 
         for(Account acc : accounts) {
-            Decimal totalAmount = totalsMap.containsKey(acc.Id) ? totalsMap.get(acc.Id) : 0;
+
+            Decimal totalAmount = totalsMap.get(acc.Id);
+            if (totalAmount == null) totalAmount = 0;
             
             try {
-                // Mockable Callout logic
-                Integer creditRating = getCreditRating(acc.Id);
+
+                Integer creditRating = 0;
+                if(Limits.getCallouts() < Limits.getLimitCallouts()) {
+                    creditRating = getCreditRating(acc.Id);
+                }
+                
                 acc.Priority_Score__c = (totalAmount / 10000) + creditRating;
             } catch (Exception e) {
-                // Scenario: Exceptions/Unexpected
-                acc.addError('Critical failure in Priority Calculation: ' + e.getMessage());
+                acc.addError('Critical failure: ' + e.getMessage());
             }
         }
     }
