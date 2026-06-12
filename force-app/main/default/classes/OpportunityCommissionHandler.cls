@@ -1,39 +1,66 @@
 public class OpportunityCommissionHandler {
     
-    // This method is called from an Opportunity trigger after update
     public static void handleClosedWonOpportunities(List<Opportunity> newOpps, Map<Id, Opportunity> oldOpps) {
+        List<Task> tasksToInsert = new List<Task>();
+        Set<Id> accountIds = new Set<Id>();
+        List<Opportunity> validOpps = new List<Opportunity>();
         
+        // Step 1: Filter opportunities and safely collect Account IDs
         for (Opportunity opp : newOpps) {
-            // ANTI-PATTERN 1: Accessing old map values inside a loop without checking if the ID exists
-            Opportunity oldOpp = oldOpps.get(opp.Id);
+            // Safely grab the historical state of the record if it exists
+            Opportunity oldOpp = (oldOpps != null && oldOpps.containsKey(opp.Id)) ? oldOpps.get(opp.Id) : null;
             
-            // Check if it just changed to Closed Won
-            if (opp.StageName == 'Closed Won' && oldOpp.StageName != 'Closed Won') {
-                
-                // ANTI-PATTERN 2: SOQL Query inside a FOR Loop! 
-                // This will throw a "System.LimitException: Too many SOQL queries: 101" if more than 100 records are updated.
-                Account acc = [SELECT Id, Rating FROM Account WHERE Id = :opp.AccountId];
-                
-                // ANTI-PATTERN 3: Lack of Null Pointer Exception (NPE) protection
-                // If an opportunity doesn't have an Account, the query above fails, or 'acc' becomes null, crashing the transaction.
-                Decimal rate = 0.05; // Default 5%
-                if (acc.Rating == 'Hot') {
-                    rate = 0.10; // 10% for Hot accounts
-                }
-                
-                // Create a standard Task record
-                Task commTask = new Task();
-                commTask.Subject = 'Commission Processing Required';
-                commTask.WhatId = opp.Id;
-                commTask.OwnerId = opp.OwnerId;
-                commTask.Status = 'Not Started';
-                commTask.Priority = 'High';
-                commTask.Description = 'Calculated Commission: $' + (opp.Amount * rate);
-                
-                // ANTI-PATTERN 4: DML statement (insert) inside a FOR Loop!
-                // This will throw a "System.LimitException: Too many DML statements: 151" if more than 150 records are updated.
-                insert commTask;
+            // Edge Case Protection: Verify the stage ACTUALLY changed to Closed Won
+            // This prevents duplicate tasks if a user edits a record that is already Closed Won
+            Boolean isClosedWonTransition = (opp.StageName == 'Closed Won' && (oldOpp == null || oldOpp.StageName != 'Closed Won'));
+            
+            // Edge Case Protection: Skip records missing required calculation data (Account or Amount)
+            if (isClosedWonTransition && opp.AccountId != null && opp.Amount != null) {
+                accountIds.add(opp.AccountId);
+                validOpps.add(opp);
             }
+        }
+        
+        // Guard Clause: If no records match criteria, exit immediately to save CPU time
+        if (validOpps.isEmpty()) {
+            return;
+        }
+        
+        // Step 2: Single bulk SOQL query outside the loop
+        Map<Id, Account> accountMap = new Map<Id, Account>([
+            SELECT Id, Rating 
+            FROM Account 
+            WHERE Id IN :accountIds
+        ]);
+        
+        // Step 3: Loop through filtered records and construct standard Tasks
+        for (Opportunity opp : validOpps) {
+            Account parentAcc = accountMap.get(opp.AccountId);
+            
+            // Default 5% commission rate
+            Decimal rate = 0.05; 
+            
+            // Edge Case Protection: Handle missing or unpopulated Account Map values gracefully
+            if (parentAcc != null && parentAcc.Rating == 'Hot') {
+                rate = 0.10; // Premium 10% rate
+            }
+            
+            Decimal commissionAmount = opp.Amount * rate;
+            
+            Task commTask = new Task(
+                Subject = 'Commission Processing Required',
+                WhatId = opp.Id,
+                OwnerId = opp.OwnerId,
+                Status = 'Not Started',
+                Priority = 'High',
+                Description = 'Calculated Commission: $' + commissionAmount + ' based on a ' + (rate * 100) + '% rate.'
+            );
+            tasksToInsert.add(commTask);
+        }
+        
+        // Step 4: Single bulk DML insert outside the loop
+        if (!tasksToInsert.isEmpty()) {
+            insert tasksToInsert;
         }
     }
 }
